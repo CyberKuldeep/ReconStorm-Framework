@@ -18,7 +18,12 @@ httpx -l $base/recon/subdomains.txt \
  -status-code \
  -title \
  -tech-detect \
- -silent > $base/recon/live_hosts.txt
+ -web-server \
+ -ip \
+ -cdn \
+ -follow-redirects \
+ -silent \
+ -o $base/recon/live_hosts.txt
 
 gau $domain > $base/recon/urls.txt
 
