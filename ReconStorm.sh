@@ -12,7 +12,7 @@ source config/api_keys.conf
 date=$(date +%F)
 base_dir="output/${domain}-${date}"
 
-mkdir -p "$base_dir"/{recon,scan,enum,vuln,exploit,intelligence,report}
+mkdir -p "$base_dir"/{recon,scan,enum,vuln,exploit}
 
 echo "[+] Starting BugSploit Framework on $domain"
 
