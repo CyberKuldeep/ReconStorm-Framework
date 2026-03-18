@@ -14,7 +14,7 @@ base_dir="output/${domain}-${date}"
 
 mkdir -p "$base_dir"/{recon,scan,enum,vuln,exploit}
 
-echo "[+] Starting BugSploit Framework on $domain"
+echo "[+] Starting ReconStorm Framework on $domain"
 
 bash modules/recon.sh $domain $base_dir
 bash modules/scanning.sh $domain $base_dir
