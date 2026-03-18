@@ -1,14 +1,14 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 echo "[+] Starting ReconStorm Installation 🔥"
 
 # -----------------------------
-# UPDATE SYSTEM & UPGRADE
+# UPDATE SYSTEM
 # -----------------------------
 echo "[+] Updating system..."
-sudo apt update -y && suao apt upgrade -y
+sudo apt update -y
 
 # -----------------------------
 # INSTALL BASE DEPENDENCIES
@@ -41,34 +41,41 @@ fi
 export PATH=$PATH:$(go env GOPATH)/bin
 
 # -----------------------------
-# INSTALL GO TOOLS
+# INSTALL GO TOOLS (SAFE MODE)
 # -----------------------------
 echo "[+] Installing Go tools..."
 
-go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-go install github.com/tomnomnom/assetfinder@latest
-go install github.com/projectdiscovery/uncover/cmd/uncover@latest
-go install github.com/gwen001/github-subdomains@latest
+go_tools=(
+"github.com/projectdiscovery/subfinder/v2/cmd/subfinder"
+"github.com/tomnomnom/assetfinder"
+"github.com/projectdiscovery/uncover/cmd/uncover"
+"github.com/gwen001/github-subdomains"
 
-go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-go install github.com/hakluke/hakrawler@latest
-go install github.com/projectdiscovery/katana/cmd/katana@latest
-go install github.com/lc/gau/v2/cmd/gau@latest
-go install github.com/tomnomnom/waybackurls@latest
+"github.com/projectdiscovery/httpx/cmd/httpx"
+"github.com/hakluke/hakrawler"
+"github.com/projectdiscovery/katana/cmd/katana"
+"github.com/lc/gau/v2/cmd/gau"
+"github.com/tomnomnom/waybackurls"
 
-go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest
+"github.com/projectdiscovery/naabu/v2/cmd/naabu"
+"github.com/projectdiscovery/dnsx/cmd/dnsx"
+"github.com/projectdiscovery/tlsx/cmd/tlsx"
 
-go install github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
-go install github.com/hahwul/dalfox/v2@latest
+"github.com/projectdiscovery/nuclei/v2/cmd/nuclei"
+"github.com/hahwul/dalfox/v2"
 
-go install github.com/tomnomnom/gf@latest
-go install github.com/tomnomnom/qsreplace@latest
-go install github.com/tomnomnom/anew@latest
+"github.com/tomnomnom/gf"
+"github.com/tomnomnom/qsreplace"
+"github.com/tomnomnom/anew"
 
-go install github.com/PentestPad/subzy@latest
-go install github.com/sensepost/gowitness@latest
+"github.com/PentestPad/subzy"
+"github.com/sensepost/gowitness"
+)
+
+for tool in "${go_tools[@]}"; do
+    echo "[+] Installing $tool"
+    go install "$tool@latest" || echo "[!] Failed: $tool"
+done
 
 # -----------------------------
 # RUSTSCAN
@@ -87,8 +94,7 @@ fi
 echo "[+] Installing Python tools..."
 
 pipx ensurepath --force
-
-pipx install droopescan || true
+pipx install droopescan || echo "[!] droopescan install skipped"
 
 # -----------------------------
 # JS ANALYSIS TOOLS
@@ -138,11 +144,26 @@ fi
 # -----------------------------
 echo "[+] Updating Nuclei templates..."
 
-nuclei -update-templates
+nuclei -update-templates || echo "[!] nuclei templates update skipped"
+
+# -----------------------------
+# TOOL VERIFICATION
+# -----------------------------
+echo "[+] Verifying important tools..."
+
+tools_check=(subfinder httpx nuclei naabu ffuf nmap)
+
+for cmd in "${tools_check[@]}"; do
+    if command -v $cmd &> /dev/null; then
+        echo "[✔] $cmd installed"
+    else
+        echo "[✘] $cmd missing"
+    fi
+done
 
 # -----------------------------
 # FINAL MESSAGE
 # -----------------------------
 echo ""
-echo "[✔] ReconStorm Installation Completed Successfully 🚀"
-echo "[✔] Restart your terminal or run: source ~/.bashrc"
+echo "[🔥] ReconStorm Installation Completed Successfully!"
+echo "[👉] Restart terminal or run: source ~/.bashrc"
