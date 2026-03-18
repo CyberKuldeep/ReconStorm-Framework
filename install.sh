@@ -8,7 +8,7 @@ echo "[+] Starting ReconStorm Installation 🔥"
 # UPDATE SYSTEM
 # -----------------------------
 echo "[+] Updating system..."
-sudo apt update -y
+sudo apt update -y && sudo apt upgrade -y
 
 # -----------------------------
 # INSTALL BASE DEPENDENCIES
