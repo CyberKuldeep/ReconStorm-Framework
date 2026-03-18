@@ -41,7 +41,7 @@ fi
 export PATH=$PATH:$(go env GOPATH)/bin
 
 # -----------------------------
-# INSTALL GO TOOLS (SAFE MODE)
+# INSTALL GO TOOLS
 # -----------------------------
 echo "[+] Installing Go tools..."
 
@@ -78,6 +78,43 @@ for tool in "${go_tools[@]}"; do
 done
 
 # -----------------------------
+# SMART SHELL DETECTION + PATH FIX
+# -----------------------------
+echo "[+] Detecting shell and fixing PATH..."
+
+CURRENT_SHELL=$(basename "$SHELL")
+GO_PATH="$HOME/go/bin"
+
+add_path() {
+    FILE=$1
+    if ! grep -q "$GO_PATH" "$FILE" 2>/dev/null; then
+        echo "export PATH=\$PATH:$GO_PATH" >> "$FILE"
+        echo "[+] Added Go PATH to $FILE"
+    else
+        echo "[✔] PATH already exists in $FILE"
+    fi
+}
+
+if [[ "$CURRENT_SHELL" == "bash" ]]; then
+    add_path "$HOME/.bashrc"
+    source "$HOME/.bashrc" || true
+
+elif [[ "$CURRENT_SHELL" == "zsh" ]]; then
+    add_path "$HOME/.zshrc"
+    source "$HOME/.zshrc" || true
+
+else
+    echo "[!] Unknown shell, updating both..."
+    add_path "$HOME/.bashrc"
+    add_path "$HOME/.zshrc"
+fi
+
+# Apply immediately
+export PATH=$PATH:$GO_PATH
+
+echo "[✔] PATH configured successfully!"
+
+# -----------------------------
 # RUSTSCAN
 # -----------------------------
 echo "[+] Installing Rustscan..."
@@ -89,7 +126,7 @@ if ! command -v rustscan &> /dev/null; then
 fi
 
 # -----------------------------
-# PYTHON TOOLS (PEP 668 SAFE)
+# PYTHON TOOLS
 # -----------------------------
 echo "[+] Installing Python tools..."
 
@@ -151,7 +188,7 @@ nuclei -update-templates || echo "[!] nuclei templates update skipped"
 # -----------------------------
 echo "[+] Verifying important tools..."
 
-tools_check=(subfinder httpx nuclei naabu ffuf nmap)
+tools_check=(subfinder httpx nuclei naabu ffuf nmap katana)
 
 for cmd in "${tools_check[@]}"; do
     if command -v $cmd &> /dev/null; then
@@ -166,4 +203,4 @@ done
 # -----------------------------
 echo ""
 echo "[🔥] ReconStorm Installation Completed Successfully!"
-echo "[👉] Restart terminal or run: source ~/.bashrc"
+echo "[👉] Restart terminal OR run: source ~/.zshrc / ~/.bashrc"
