@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -euo pipefail
+set -uo pipefail   # removed -e (IMPORTANT FIX)
 
 target=${1:-}
 
@@ -22,23 +22,18 @@ else
 fi
 
 # -----------------------------
-# LOAD CONFIG (SAFE)
-# -----------------------------
-if [ -f config/api_keys.conf ]; then
-    source config/api_keys.conf
-else
-    echo "[!] No API config found (Skipping APIs)"
-fi
-
-# -----------------------------
 # OUTPUT SETUP
 # -----------------------------
 date=$(date +%F)
 base_dir="output/${target}-${date}"
 
 mkdir -p "$base_dir"/{recon,scan,enum,vuln,exploit,logs,tmp}
-
 logfile="$base_dir/logs/run.log"
+
+# -----------------------------
+# LIVE LOGGING (IMPORTANT 🔥)
+# -----------------------------
+exec > >(tee -a "$logfile") 2>&1
 
 echo "====================================="
 echo "[🔥] ReconStorm Framework Started"
@@ -49,11 +44,21 @@ echo "[+] Output : $base_dir"
 echo "====================================="
 
 # -----------------------------
-# TOOL CHECK (IMPORTANT)
+# ENVIRONMENT FIX (PATH)
+# -----------------------------
+echo "[+] Fixing PATH..."
+
+export PATH=$PATH:$HOME/go/bin:/usr/local/go/bin
+
+# -----------------------------
+# TOOL CHECK (IMPROVED)
 # -----------------------------
 check_tool() {
-    if ! command -v "$1" &> /dev/null; then
-        echo "[✘] Missing tool: $1"
+    if command -v "$1" &> /dev/null; then
+        echo "[✔] Found: $1"
+    else
+        echo "[✘] Missing: $1"
+        MISSING=1
     fi
 }
 
@@ -62,20 +67,28 @@ for tool in subfinder httpx nuclei nmap gau katana; do
     check_tool $tool
 done
 
+if [ "${MISSING:-0}" -eq 1 ]; then
+    echo "[!] Some tools are missing. Script will continue but results may be incomplete."
+fi
+
 # -----------------------------
-# MODULE RUNNER
+# MODULE RUNNER (FIXED 🔥)
 # -----------------------------
 run_module() {
     name=$1
     script=$2
 
     if [ -f "$script" ]; then
+        echo ""
         echo "[+] Running $name..."
-        echo "[+] Running $name..." >> "$logfile"
 
-        bash "$script" "$target" "$base_dir" "$TYPE" >> "$logfile" 2>&1
+        # Run safely (no crash)
+        if bash "$script" "$target" "$base_dir" "$TYPE"; then
+            echo "[✔] $name completed"
+        else
+            echo "[!] $name failed but continuing..."
+        fi
 
-        echo "[✔] $name completed"
     else
         echo "[✘] Module missing: $script"
     fi
@@ -85,14 +98,12 @@ run_module() {
 # EXECUTION FLOW
 # -----------------------------
 
-# Recon → Only domain
 if [ "$TYPE" == "domain" ]; then
     run_module "Recon" "modules/recon.sh"
 else
     echo "[!] Skipping Recon (IP target)"
 fi
 
-# Core modules (both)
 run_module "Scanning" "modules/scanning.sh"
 run_module "Enumeration" "modules/enumeration.sh"
 run_module "Vulnerability Scan" "modules/vulnscan.sh"
