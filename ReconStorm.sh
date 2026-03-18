@@ -21,7 +21,6 @@ bash modules/scanning.sh $domain $base_dir
 bash modules/enumeration.sh $domain $base_dir
 bash modules/vulnscan.sh $domain $base_dir
 bash modules/exploitation.sh $domain $base_dir
-bash modules/intelligence.sh $domain $base_dir
-bash modules/reporting.sh $domain $base_dir
+
 
 echo "[+] Scan Complete
