@@ -83,7 +83,7 @@ output/target-date/
 ├── scan/         # Ports, services
 ├── enum/         # Endpoints, parameters
 ├── vuln/         # Vulnerability findings
-├── exploit/      # Exploit data
+├── exploit/      # Exploits if Avalivable
 └── logs/         # Logs
 ```
 ---
