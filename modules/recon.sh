@@ -1,84 +1,209 @@
 #!/bin/bash
+# =============================================================
+#  ReconStorm — Module: Recon
+#  Args: $1=target  $2=base_dir  $3=type
+# =============================================================
+set -uo pipefail
 
-set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$SCRIPT_DIR/config/config.sh"
+source "$SCRIPT_DIR/lib/logger.sh"
+source "$SCRIPT_DIR/lib/utils.sh"
 
-target=$1
-base=$2
-type=${3:-domain}
+TARGET="$1"
+BASE="$2"
+TYPE="${3:-domain}"
 
-echo "[+] Recon Module Started..."
+log_step "Recon Module: $TARGET"
 
-# -----------------------------
-# CHECK TYPE
-# -----------------------------
-if [ "$type" != "domain" ]; then
-    echo "[!] Recon skipped (Target is IP)"
+if [[ "$TYPE" != "domain" ]]; then
+    log_info "Skipping recon (IP target — use scanning module)"
     exit 0
 fi
 
-# -----------------------------
-# CREATE DIR
-# -----------------------------
-mkdir -p "$base/recon"
+mkdir -p "$BASE/recon" "$BASE/tmp"
 
-# -----------------------------
-# SUBDOMAIN ENUMERATION
-# -----------------------------
-echo "[+] Enumerating subdomains..."
+# ── 1. Passive Subdomain Enumeration (parallel) ───────────────
+log_info "Passive subdomain enumeration..."
 
-subfinder -d "$target" -silent > "$base/recon/subfinder.txt" 2>/dev/null &
-assetfinder --subs-only "$target" > "$base/recon/assetfinder.txt" 2>/dev/null &
-amass enum -passive -d "$target" > "$base/recon/amass.txt" 2>/dev/null &
+pids=()
 
-wait
+if require_tool subfinder; then
+    subfinder -d "$TARGET" -silent \
+        ${GITHUB_TOKEN:+-authorization "token $GITHUB_TOKEN"} \
+        -o "$BASE/recon/subfinder.txt" 2>/dev/null &
+    pids+=($!)
+fi
 
-# -----------------------------
-# MERGE RESULTS
-# -----------------------------
-echo "[+] Merging subdomains..."
+if require_tool assetfinder; then
+    assetfinder --subs-only "$TARGET" \
+        > "$BASE/recon/assetfinder.txt" 2>/dev/null &
+    pids+=($!)
+fi
 
-cat "$base/recon/"*.txt 2>/dev/null | sort -u | grep -E "$target$" > "$base/recon/subdomains.txt"
+if require_tool amass; then
+    # passive only — amass active is very slow and noisy
+    timeout 120 amass enum -passive -d "$TARGET" \
+        -o "$BASE/recon/amass.txt" 2>/dev/null &
+    pids+=($!)
+fi
 
-# -----------------------------
-# LIVE HOST CHECK (FIXED)
-# -----------------------------
-echo "[+] Probing live hosts..."
+# GitHub dorking via API (if token set)
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    log_info "GitHub subdomain dorking..."
+    curl -s -H "Authorization: token $GITHUB_TOKEN" \
+        "https://api.github.com/search/code?q=%22.$TARGET%22&per_page=100" \
+        | grep -oP '[\w.-]+\.$TARGET' 2>/dev/null \
+        | sort -u > "$BASE/recon/github_subs.txt" || true
+fi
 
-if [ -s "$base/recon/subdomains.txt" ]; then
-    httpx -l "$base/recon/subdomains.txt" \
-        -threads 200 \
+# Shodan (if API key set)
+if require_tool shodan && [[ -n "${SHODAN_API:-}" ]]; then
+    log_info "Shodan subdomain lookup..."
+    shodan host "$TARGET" 2>/dev/null | grep -oP '[\w.-]+\.$TARGET' \
+        > "$BASE/recon/shodan_subs.txt" || true
+fi
+
+# Certificiate transparency (crt.sh — no API key needed)
+log_info "Certificate transparency (crt.sh)..."
+curl -s --max-time 30 \
+    "https://crt.sh/?q=%25.$TARGET&output=json" 2>/dev/null \
+    | grep -oP '"name_value":"[^"]*"' \
+    | sed 's/"name_value":"//;s/"//' \
+    | sed 's/\*\.//g' \
+    | grep -E "\.${TARGET}$" \
+    | sort -u > "$BASE/recon/crtsh.txt" || true
+
+wait_jobs "${pids[@]}"
+
+# ── 2. Merge & Filter Subdomains ─────────────────────────────
+log_info "Merging subdomain results..."
+merge_files "$BASE/recon/subdomains_raw.txt" \
+    "$BASE/recon/subfinder.txt"  \
+    "$BASE/recon/assetfinder.txt" \
+    "$BASE/recon/amass.txt"      \
+    "$BASE/recon/github_subs.txt" \
+    "$BASE/recon/shodan_subs.txt" \
+    "$BASE/recon/crtsh.txt"      \
+    2>/dev/null || true
+
+# Validate: must end with target domain, no wildcards, no blank
+grep -E "^[a-zA-Z0-9][a-zA-Z0-9._-]*\.${TARGET}$" \
+    "$BASE/recon/subdomains_raw.txt" 2>/dev/null \
+    | sort -u > "$BASE/recon/subdomains.txt" || true
+
+SUBDOMAIN_COUNT=$(count_lines "$BASE/recon/subdomains.txt")
+log_ok "Found $SUBDOMAIN_COUNT unique subdomains"
+
+# ── 3. DNS Resolution & Wildcard Detection ────────────────────
+log_info "Detecting wildcard DNS..."
+RAND_SUB="$(tr -dc 'a-z0-9' < /dev/urandom | head -c 12).${TARGET}"
+if dig +short "$RAND_SUB" 2>/dev/null | grep -qE '^[0-9]'; then
+    log_warn "Wildcard DNS detected! Results may include false positives."
+    echo "WILDCARD_DETECTED=1" >> "$BASE/recon/dns_info.txt"
+fi
+
+# ── 4. Live Host Probing ──────────────────────────────────────
+if ! has_results "$BASE/recon/subdomains.txt"; then
+    log_warn "No subdomains found — skipping live host probe"
+else
+    log_info "Probing live hosts with httpx ($HTTPX_THREADS threads)..."
+
+    require_tool httpx && httpx \
+        -l "$BASE/recon/subdomains.txt" \
+        -threads "$HTTPX_THREADS" \
         -status-code \
         -title \
         -tech-detect \
         -web-server \
         -ip \
         -cdn \
+        -cname \
         -follow-redirects \
+        -random-agent \
         -silent \
-        -o "$base/recon/live_hosts.txt"
-else
-    echo "[!] No subdomains found"
+        -retries 2 \
+        ${PROXY:+-http-proxy "$PROXY"} \
+        -o "$BASE/recon/live_hosts.txt" 2>/dev/null || true
+
+    LIVE_COUNT=$(count_lines "$BASE/recon/live_hosts.txt")
+    log_ok "Found $LIVE_COUNT live hosts"
+
+    # Extract clean URLs (first column) for downstream modules
+    awk '{print $1}' "$BASE/recon/live_hosts.txt" 2>/dev/null \
+        | sort -u > "$BASE/recon/live_urls.txt" || true
 fi
 
-# -----------------------------
-# URL COLLECTION
-# -----------------------------
-echo "[+] Collecting URLs..."
+# ── 5. URL Collection ─────────────────────────────────────────
+log_info "Collecting historical URLs (gau)..."
+pids=()
 
-gau "$target" > "$base/recon/urls.txt" 2>/dev/null || true
-
-# -----------------------------
-# CRAWLING
-# -----------------------------
-echo "[+] Crawling targets..."
-
-if [ -s "$base/recon/live_hosts.txt" ]; then
-    katana -list "$base/recon/live_hosts.txt" -silent > "$base/recon/crawled_urls.txt"
-else
-    echo "[!] No live hosts for crawling"
+if require_tool gau; then
+    run_safe "$GAU_TIMEOUT" gau "$TARGET" \
+        --threads 5 \
+        --blacklist png,jpg,gif,ico,css,woff,woff2,ttf \
+        2>/dev/null \
+        > "$BASE/recon/gau.txt" &
+    pids+=($!)
 fi
 
-# -----------------------------
-# DONE
-# -----------------------------
-echo "[✔] Recon Module Completed"
+# waybackurls as fallback / supplement
+if require_tool waybackurls; then
+    echo "$TARGET" | run_safe 60 waybackurls \
+        > "$BASE/recon/wayback.txt" 2>/dev/null &
+    pids+=($!)
+fi
+
+wait_jobs "${pids[@]}"
+
+merge_files "$BASE/recon/urls_raw.txt" \
+    "$BASE/recon/gau.txt" \
+    "$BASE/recon/wayback.txt" 2>/dev/null || true
+
+# Filter garbage extensions
+grep -vE "\.(png|jpg|jpeg|gif|ico|css|woff|woff2|ttf|eot|svg|mp4|mp3|pdf)(\?|$)" \
+    "$BASE/recon/urls_raw.txt" 2>/dev/null \
+    | sort -u > "$BASE/recon/urls.txt" || true
+
+URL_COUNT=$(count_lines "$BASE/recon/urls.txt")
+log_ok "Collected $URL_COUNT filtered URLs"
+
+# ── 6. Crawling ───────────────────────────────────────────────
+if has_results "$BASE/recon/live_urls.txt"; then
+    log_info "Crawling live hosts with katana (depth=$KATANA_DEPTH)..."
+    require_tool katana && katana \
+        -list "$BASE/recon/live_urls.txt" \
+        -depth "$KATANA_DEPTH" \
+        -silent \
+        -jc \
+        -kf all \
+        -ef png,jpg,gif,ico,css,woff,ttf \
+        ${PROXY:+-proxy "$PROXY"} \
+        -o "$BASE/recon/crawled.txt" 2>/dev/null || true
+
+    CRAWL_COUNT=$(count_lines "$BASE/recon/crawled.txt")
+    log_ok "Crawled $CRAWL_COUNT URLs"
+
+    # Merge crawled into main URL list
+    merge_files "$BASE/recon/all_urls.txt" \
+        "$BASE/recon/urls.txt" \
+        "$BASE/recon/crawled.txt" 2>/dev/null || true
+else
+    cp "$BASE/recon/urls.txt" "$BASE/recon/all_urls.txt" 2>/dev/null || true
+fi
+
+# ── 7. Scope Check ───────────────────────────────────────────
+# Remove out-of-scope URLs (different root domains)
+if has_results "$BASE/recon/all_urls.txt"; then
+    grep -E "https?://[^/]*\.?${TARGET}([:/?]|$)" \
+        "$BASE/recon/all_urls.txt" \
+        | sort -u > "$BASE/recon/in_scope_urls.txt" || true
+fi
+
+# ── Summary ───────────────────────────────────────────────────
+echo ""
+log_ok "Recon Summary:"
+log_ok "  Subdomains   : $(count_lines "$BASE/recon/subdomains.txt")"
+log_ok "  Live Hosts   : $(count_lines "$BASE/recon/live_hosts.txt")"
+log_ok "  Total URLs   : $(count_lines "$BASE/recon/all_urls.txt")"
+log_ok "  In-Scope URLs: $(count_lines "$BASE/recon/in_scope_urls.txt")"
