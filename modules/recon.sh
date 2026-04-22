@@ -109,59 +109,60 @@ if ! has_results "$BASE/recon/subdomains.txt"; then
 else
     log_info "Probing live hosts with httpx ($HTTPX_THREADS threads)..."
 
+    # 1. Use -no-color to ensure awk doesn't grab ANSI escape sequences
+    # 2. Use -csv or -json if you want to be even safer
     require_tool httpx && httpx \
         -l "$BASE/recon/subdomains.txt" \
         -threads "$HTTPX_THREADS" \
-        -status-code \
-        -title \
-        -tech-detect \
-        -web-server \
-        -ip \
-        -cdn \
-        -cname \
-        -follow-redirects \
-        -random-agent \
-        -silent \
+        -status-code -title -tech-detect -web-server -ip -cdn -cname \
+        -follow-redirects -random-agent -silent -no-color \
         -retries 2 \
         ${PROXY:+-http-proxy "$PROXY"} \
-        -o "$BASE/recon/live_hosts.txt" 2>/dev/null || true
+        -o "$BASE/recon/live_hosts.txt"
 
-    LIVE_COUNT=$(count_lines "$BASE/recon/live_hosts.txt")
-    log_ok "Found $LIVE_COUNT live hosts"
-
-    # Extract clean URLs (first column) for downstream modules
-    awk '{print $1}' "$BASE/recon/live_hosts.txt" 2>/dev/null \
-        | sort -u > "$BASE/recon/live_urls.txt" || true
+    if [ -s "$BASE/recon/live_hosts.txt" ]; then
+        # Use awk to grab the URL, but ensure we handle potential [status] prefixes
+        awk '{for(i=1;i<=NF;i++) if($i ~ /^https?:\/\//) {print $i; break}}' "$BASE/recon/live_hosts.txt" \
+            | sort -u > "$BASE/recon/live_urls.txt"
+        
+        LIVE_COUNT=$(count_lines "$BASE/recon/live_urls.txt")
+        log_ok "Found $LIVE_COUNT live hosts"
+    else
+        log_warn "httpx completed but found 0 live hosts"
+    fi
 fi
 
 # ── 5. URL Collection ─────────────────────────────────────────
-log_info "Collecting historical URLs (gau)..."
+log_info "Collecting historical URLs..."
 pids=()
 
+# Use gau as primary
 if require_tool gau; then
     run_safe "$GAU_TIMEOUT" gau "$TARGET" \
         --threads 5 \
         --blacklist png,jpg,gif,ico,css,woff,woff2,ttf \
-        2>/dev/null \
-        > "$BASE/recon/gau.txt" &
+        > "$BASE/recon/gau.txt" 2>/dev/null &
     pids+=($!)
 fi
 
-# waybackurls as fallback / supplement
+# Use waybackurls only if gau isn't present, or as a small supplement
 if require_tool waybackurls; then
     echo "$TARGET" | run_safe 60 waybackurls \
         > "$BASE/recon/wayback.txt" 2>/dev/null &
     pids+=($!)
 fi
 
-wait_jobs "${pids[@]}"
+# ONLY wait if there are actual PIDs to wait for
+if [ ${#pids[@]} -gt 0 ]; then
+    wait "${pids[@]}"
+fi
 
-merge_files "$BASE/recon/urls_raw.txt" \
-    "$BASE/recon/gau.txt" \
-    "$BASE/recon/wayback.txt" 2>/dev/null || true
+# Use 'cat -s' to suppress errors if one file was never created
+cat "$BASE/recon/gau.txt" "$BASE/recon/wayback.txt" 2>/dev/null > "$BASE/recon/urls_raw.txt" || true
 
 # Filter garbage extensions
-grep -vE "\.(png|jpg|jpeg|gif|ico|css|woff|woff2|ttf|eot|svg|mp4|mp3|pdf)(\?|$)" \
+# ADDED: js, webp, and fonts to the regex for better recon hygiene
+grep -vE "\.(png|jpg|jpeg|gif|ico|css|woff|woff2|ttf|eot|svg|mp4|mp3|pdf|webp|js)(\?|$)" \
     "$BASE/recon/urls_raw.txt" 2>/dev/null \
     | sort -u > "$BASE/recon/urls.txt" || true
 
@@ -171,33 +172,50 @@ log_ok "Collected $URL_COUNT filtered URLs"
 # ── 6. Crawling ───────────────────────────────────────────────
 if has_results "$BASE/recon/live_urls.txt"; then
     log_info "Crawling live hosts with katana (depth=$KATANA_DEPTH)..."
+    
+    # 1. Added -no-color for cleaner logs
+    # 2. Added -automatic-proxy if PROXY is not set (optional)
     require_tool katana && katana \
         -list "$BASE/recon/live_urls.txt" \
         -depth "$KATANA_DEPTH" \
         -silent \
         -jc \
         -kf all \
-        -ef png,jpg,gif,ico,css,woff,ttf \
+        -no-color \
+        -ef png,jpg,gif,ico,css,woff,ttf,svg,webp \
         ${PROXY:+-proxy "$PROXY"} \
         -o "$BASE/recon/crawled.txt" 2>/dev/null || true
 
+    # Merge and Deduplicate (Crucial Step)
+    # Using 'sort -u' directly ensures all_urls.txt is clean
+    cat "$BASE/recon/urls.txt" "$BASE/recon/crawled.txt" 2>/dev/null \
+        | sort -u > "$BASE/recon/all_urls.txt"
+    
     CRAWL_COUNT=$(count_lines "$BASE/recon/crawled.txt")
-    log_ok "Crawled $CRAWL_COUNT URLs"
-
-    # Merge crawled into main URL list
-    merge_files "$BASE/recon/all_urls.txt" \
-        "$BASE/recon/urls.txt" \
-        "$BASE/recon/crawled.txt" 2>/dev/null || true
+    TOTAL_COUNT=$(count_lines "$BASE/recon/all_urls.txt")
+    log_ok "Crawled $CRAWL_COUNT new URLs | Total unique: $TOTAL_COUNT"
 else
-    cp "$BASE/recon/urls.txt" "$BASE/recon/all_urls.txt" 2>/dev/null || true
+    log_warn "No live URLs to crawl — using historical data only"
+    sort -u "$BASE/recon/urls.txt" > "$BASE/recon/all_urls.txt" 2>/dev/null || true
 fi
 
 # ── 7. Scope Check ───────────────────────────────────────────
 # Remove out-of-scope URLs (different root domains)
 if has_results "$BASE/recon/all_urls.txt"; then
-    grep -E "https?://[^/]*\.?${TARGET}([:/?]|$)" \
-        "$BASE/recon/all_urls.txt" \
-        | sort -u > "$BASE/recon/in_scope_urls.txt" || true
+    log_info "Filtering out-of-scope URLs..."
+
+    # Escape dots in the target for safe Regex (e.g., example.com -> example\.com)
+    SAFE_TARGET=$(echo "$TARGET" | sed 's/\./\\./g')
+
+    # 1. LC_ALL=C for speed
+    # 2. Match http(s)://
+    # 3. Match optional subdomains ([a-z0-9.-]+\.)?
+    # 4. Match the literal target and ensure it's followed by port, path, or end of line
+    LC_ALL=C grep -Ei "^https?://([a-z0-9.-]+\.)?${SAFE_TARGET}(:[0-9]+)?([/]|(\?.*)|$)" \
+        "$BASE/recon/all_urls.txt" | sort -u > "$BASE/recon/in_scope_urls.txt" || true
+
+    # Clean up the raw file to save space if needed
+    # rm "$BASE/recon/all_urls.txt" 
 fi
 
 # ── Summary ───────────────────────────────────────────────────
