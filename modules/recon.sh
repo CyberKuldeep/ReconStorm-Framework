@@ -132,74 +132,88 @@ else
     fi
 fi
 
-# ── 5. URL Collection ─────────────────────────────────────────
+# ── 5. URL Collection (Historical) ───────────────────────────
 log_info "Collecting historical URLs..."
 pids=()
 
-# Use gau as primary
 if require_tool gau; then
     run_safe "$GAU_TIMEOUT" gau "$TARGET" \
         --threads 5 \
-        --blacklist png,jpg,gif,ico,css,woff,woff2,ttf \
+        --blacklist png,jpg,gif,ico,css,woff,woff2,ttf,svg,webp \
         > "$BASE/recon/gau.txt" 2>/dev/null &
     pids+=($!)
 fi
 
-# Use waybackurls only if gau isn't present, or as a small supplement
 if require_tool waybackurls; then
     echo "$TARGET" | run_safe 60 waybackurls \
         > "$BASE/recon/wayback.txt" 2>/dev/null &
     pids+=($!)
 fi
 
-# ONLY wait if there are actual PIDs to wait for
-if [ ${#pids[@]} -gt 0 ]; then
-    wait "${pids[@]}"
-fi
+[ ${#pids[@]} -gt 0 ] && wait "${pids[@]}"
 
-# Use 'cat -s' to suppress errors if one file was never created
-cat "$BASE/recon/gau.txt" "$BASE/recon/wayback.txt" 2>/dev/null > "$BASE/recon/urls_raw.txt" || true
-
-# Filter garbage extensions
-# ADDED: js, webp, and fonts to the regex for better recon hygiene
-grep -vE "\.(png|jpg|jpeg|gif|ico|css|woff|woff2|ttf|eot|svg|mp4|mp3|pdf|webp|js)(\?|$)" \
-    "$BASE/recon/urls_raw.txt" 2>/dev/null \
+# Initial cleaning and noise reduction
+# Yahan hum repetitive patterns like /p/ (product) ko nikal rahe hain
+cat "$BASE/recon/gau.txt" "$BASE/recon/wayback.txt" 2>/dev/null \
+    | grep -vE "\.(png|jpg|jpeg|gif|ico|css|woff|woff2|ttf|eot|svg|mp4|mp3|pdf|webp|js)(\?|$)" \
+    | grep -vE "/(product|p|dl|items|reviews|images)/" \
     | sort -u > "$BASE/recon/urls.txt" || true
 
-URL_COUNT=$(count_lines "$BASE/recon/urls.txt")
-log_ok "Collected $URL_COUNT filtered URLs"
-
-# ── 6. Crawling ───────────────────────────────────────────────
+# ── 6. Advanced Crawling with Katana ──────────────────────────
 if has_results "$BASE/recon/live_urls.txt"; then
-    log_info "Crawling live hosts with katana (depth=$KATANA_DEPTH)..."
+    log_info "Highly Recommended: Targeted Crawling with Katana..."
     
-    # 1. Added -no-color for cleaner logs
-    # 2. Added -automatic-proxy if PROXY is not set (optional)
+    # Katana ko "Junk" patterns batana taaki wo Flipkart ke har product ko na chhede
     require_tool katana && katana \
         -list "$BASE/recon/live_urls.txt" \
-        -depth "$KATANA_DEPTH" \
-        -silent \
-        -jc \
-        -kf all \
-        -no-color \
-        -ef png,jpg,gif,ico,css,woff,ttf,svg,webp \
+        -depth 2 \
+        -silent -jc -kf all -no-color \
+        -field-scope rd \
+        -ef png,jpg,gif,ico,css,woff,ttf,svg,webp,mp4,mp3,pdf \
+        -fbc "/(product|p|dl|items|reviews|images|static|assets|theme)/" \
         ${PROXY:+-proxy "$PROXY"} \
         -o "$BASE/recon/crawled.txt" 2>/dev/null || true
 
-    # Merge and Deduplicate (Crucial Step)
-    # Using 'sort -u' directly ensures all_urls.txt is clean
-    cat "$BASE/recon/urls.txt" "$BASE/recon/crawled.txt" 2>/dev/null \
-        | sort -u > "$BASE/recon/all_urls.txt"
+    # ── 7. The Magic Step: Deduplication with URO ────────────────
+    log_info "Deduplicating URLs with uro (Quality over Quantity)..."
     
-    CRAWL_COUNT=$(count_lines "$BASE/recon/crawled.txt")
+    cat "$BASE/recon/urls.txt" "$BASE/recon/crawled.txt" 2>/dev/null > "$BASE/recon/temp_all.txt"
+    
+    if require_tool uro; then
+        cat "$BASE/recon/temp_all.txt" | uro | sort -u > "$BASE/recon/all_urls.txt"
+    else
+        sort -u "$BASE/recon/temp_all.txt" > "$BASE/recon/all_urls.txt"
+        log_warn "uro not found! Install with 'pip install uro' for better results."
+    fi
+    
+    rm "$BASE/recon/temp_all.txt" 2>/dev/null
+
     TOTAL_COUNT=$(count_lines "$BASE/recon/all_urls.txt")
-    log_ok "Crawled $CRAWL_COUNT new URLs | Total unique: $TOTAL_COUNT"
+    log_ok "Cleanup complete! Final unique & high-value URLs: $TOTAL_COUNT"
 else
     log_warn "No live URLs to crawl — using historical data only"
     sort -u "$BASE/recon/urls.txt" > "$BASE/recon/all_urls.txt" 2>/dev/null || true
 fi
 
-# ── 7. Scope Check ───────────────────────────────────────────
+# ── 8. API & Sensitive Endpoint Discovery ─────────────────────
+log_info "Searching for APIs and Sensitive Endpoints..."
+
+if has_results "$BASE/recon/all_urls.txt"; then
+    # 1. Sabse pehle API endpoints ko alag karein
+    grep -Ei "/api/|/v1/|/v2/|/v3/|graphql|config|admin|internal|rest" \
+        "$BASE/recon/all_urls.txt" | sort -u > "$BASE/recon/api_endpoints.txt"
+
+    # 2. Sensitive files (env, backup, sql) ko search karein
+    grep -Ei "\.(bak|config|sql|env|json|xml|yaml|yml|log)$" \
+        "$BASE/recon/all_urls.txt" | sort -u > "$BASE/recon/sensitive_files.txt"
+
+    API_COUNT=$(count_lines "$BASE/recon/api_endpoints.txt")
+    SENS_COUNT=$(count_lines "$BASE/recon/sensitive_files.txt")
+    
+    log_ok "Discovery Complete: Found $API_COUNT API endpoints and $SENS_COUNT sensitive files."
+fi
+
+# ── 9. Scope Check ───────────────────────────────────────────
 # Remove out-of-scope URLs (different root domains)
 if has_results "$BASE/recon/all_urls.txt"; then
     log_info "Filtering out-of-scope URLs..."
@@ -225,3 +239,5 @@ log_ok "  Subdomains   : $(count_lines "$BASE/recon/subdomains.txt")"
 log_ok "  Live Hosts   : $(count_lines "$BASE/recon/live_hosts.txt")"
 log_ok "  Total URLs   : $(count_lines "$BASE/recon/all_urls.txt")"
 log_ok "  In-Scope URLs: $(count_lines "$BASE/recon/in_scope_urls.txt")"
+log_ok "  API Endpoints : $(count_lines "$BASE/recon/api_endpoints.txt")"
+log_ok "  Sensitive Files: $(count_lines "$BASE/recon/sensitive_files.txt")"
